@@ -4,315 +4,368 @@ import os
 import sys
 import json
 import re
-import subprocess
 import time
+import uuid
+import shutil
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+import logging
 
-# APIキー設定
-api_key = os.environ.get("GOOGLE_API_KEY")
-if not api_key:
-    print("エラー: GOOGLE_API_KEYの環境変数が設定されていません。")
-    print("以下のコマンドを実行してAPIキーを設定してください:")
-    print("export GOOGLE_API_KEY='あなたのGoogle APIキー'")
-    sys.exit(1)
+# 独自モジュールのインポート
+from tools import (
+    clean_code_output, format_response, extract_filename_from_prompt,
+    process_code_tool, handle_generate_code, handle_save_code, handle_edit_code
+)
 
-genai.configure(api_key=api_key)
+# ロギング設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
-MAX_TOKENS = 500
-CONTEXT_LENGTH = 10
-conversation_history = [
-    {"role": "user", "parts": ["""あなたはCLIコーディングアシスタントです。ユーザーの入力に基づいて、適切なツールを選択して実行してください。利用可能なツールは以下の通りです：
+# 設定値
+DEFAULT_MAX_TOKENS = 500
+DEFAULT_CONTEXT_LENGTH = 10
+DEFAULT_MODEL = "gemini-2.0-flash"
+
+class CLIAssistant:
+    """CLI AI コーディングアシスタント"""
+    
+    def __init__(self, max_tokens: int = DEFAULT_MAX_TOKENS, 
+                 context_length: int = DEFAULT_CONTEXT_LENGTH,
+                 model: str = DEFAULT_MODEL):
+        # APIキー設定
+        self.api_key = os.environ.get("GOOGLE_API_KEY")
+        if not self.api_key:
+            logger.error("GOOGLE_API_KEYの環境変数が設定されていません。")
+            logger.info("以下のコマンドを実行してAPIキーを設定してください:")
+            logger.info("export GOOGLE_API_KEY='あなたのGoogle APIキー'")
+            sys.exit(1)
+            
+        genai.configure(api_key=self.api_key)
+        
+        self.max_tokens = max_tokens
+        self.context_length = context_length
+        self.model = genai.GenerativeModel(model)
+        
+        # 会話履歴の初期化
+        self.conversation_history = [
+            {"role": "user", "parts": ["""あなたはCLIコーディングアシスタントです。ユーザーの入力に基づいて、適切なツールを選択して実行してください。利用可能なツールは以下の通りです：
 
 1. generate_code: Pythonコードを生成します。説明やコメントは含めず、コードだけを返します。
 2. review_code: Pythonコードをレビューし、改善点を提案。
-3. run_code: Pythonコードを実行し、結果を返す。
-4. debug_code: Pythonコードの潜在的なバグを指摘。
-5. save_code: 生成したコードをファイルに保存。
-6. edit_code: 既存コードを読み込んで編集。
-7. test_code: コード用のテストを生成。
-8. explain_code: コードの動作を説明。
+3. debug_code: Pythonコードの潜在的なバグを指摘。
+4. save_code: 生成したコードをファイルに保存。
+5. edit_code: 既存コードを読み込んで編集。
+6. test_code: コード用のテストを生成。
+7. explain_code: コードの動作を説明。
+8. refactor_code: コードをリファクタリング。
+9. generate_docs: コードのドキュメントを生成。
 
 ユーザーの意図を理解し、適切なツールを選択してください。ツールを呼び出す際は、以下の形式でJSONを返してください：
 {"function": "ツール名", "arguments": {"引数名": "値"}}
 
 JSONだけを返し、マークダウンのコードブロックで囲まないでください。"""]}
-]
-
-model = genai.GenerativeModel("gemini-2.0-flash")
-
-def safe_api_call(call_func, max_retries=3, retry_delay=2):
-    for attempt in range(max_retries):
-        try:
-            return call_func()
-        except Exception as e:
-            if "Resource has been exhausted" in str(e) or "429" in str(e):
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)
-                    print(f"API制限に達しました。{wait_time}秒待機してリトライします...")
-                    time.sleep(wait_time)
+        ]
+        
+        # 一時ファイルディレクトリ
+        self.temp_dir = Path("temp_files")
+        self.temp_dir.mkdir(exist_ok=True)
+        
+    def safe_api_call(self, call_func, max_retries: int = 3, retry_delay: int = 2) -> Any:
+        """API呼び出しを安全に行う（リトライロジック付き）"""
+        for attempt in range(max_retries):
+            try:
+                return call_func()
+            except Exception as e:
+                if "Resource has been exhausted" in str(e) or "429" in str(e):
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        logger.warning(f"API制限に達しました。{wait_time}秒待機してリトライします...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error("APIリクエスト制限に達しました。しばらく待ってから再試行してください。")
+                        raise
                 else:
-                    print("APIリクエスト制限に達しました。しばらく待ってから再試行してください。")
+                    logger.error(f"エラーが発生しました: {e}")
                     raise
-            else:
-                print(f"エラーが発生しました: {e}")
-                raise
-
-def clean_code_output(code_text):
-    if code_text.startswith("```python") and "```python" in code_text[10:]:
-        match = re.search(r"```python\s*(.*?)\s*```", code_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-    match = re.search(r"```(?:python)?\s*(.*?)\s*```", code_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return code_text
-
-def get_most_recent_code():
-    for message in reversed(conversation_history):
-        if message.get("role") == "model":
-            content = message.get("parts", [""])[0]
-            if "```python" in content:
-                try:
-                    code = content.split("```python\n")[1].split("\n```")[0].strip()
-                    return code
-                except IndexError:
-                    pass
-    return None
-
-def format_response(result_type, content, is_code=False):
-    """統一された出力フォーマット"""
-    prefix = f"Result: {result_type}"
-    if is_code:
-        return f"{prefix}\n```python\n{content}\n```"
-    return f"{prefix}\n{content}"
-
-def process_code_tool(func_name, args, prompt, api_call_func, is_code=False):
-    """共通のコード処理パターン"""
-    code = args.get("code") or get_most_recent_code()
-    if not code:
-        return format_response("Error", f"{func_name}するコードが見つかりませんでした。")
-    response = safe_api_call(lambda: api_call_func(code))
-    if is_code:
-        clean_response = clean_code_output(response)
-        return format_response(func_name.capitalize(), clean_response, is_code=True)
-    return format_response(func_name.capitalize(), response)
-
-def extract_filename_from_prompt(prompt):
-    """プロンプトからファイル名を抽出する"""
-    # ファイル名のパターンを探す
-    patterns = [
-        r'(\w+\.py)を読み込んで',  # 日本語パターン: "xxx.pyを読み込んで"
-        r'edit\s+(\w+\.py)',       # 英語パターン: "edit xxx.py"
-        r'(\w+\.py)',              # 単純にファイル名だけのパターン
-    ]
     
-    for pattern in patterns:
-        match = re.search(pattern, prompt)
-        if match:
-            return match.group(1)
+    def get_most_recent_code(self) -> Optional[str]:
+        """最新のコードを会話履歴から取得する"""
+        for message in reversed(self.conversation_history):
+            if message.get("role") == "model":
+                content = message.get("parts", [""])[0]
+                if "```python" in content:
+                    try:
+                        code = content.split("```python\n")[1].split("\n```")[0].strip()
+                        return code
+                    except IndexError:
+                        pass
+                    
+                # Result: Generated Code などのフォーマットからも抽出
+                match = re.search(r"Result: .*?\n```python\n(.*?)\n```", content, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+        return None
     
-    return None
-
-def chat_with_gemini(prompt):
-    global conversation_history, CONTEXT_LENGTH, MAX_TOKENS
+    def chat_with_gemini(self, prompt: str) -> str:
+        """GeminiとのChat形式での対話"""
+        # 会話履歴に追加
+        self.conversation_history.append({"role": "user", "parts": [prompt]})
+        
+        # 会話履歴をコンテキスト長に制限
+        if len(self.conversation_history) > self.context_length:
+            self.conversation_history[:] = self.conversation_history[-self.context_length:]
     
-    conversation_history.append({"role": "user", "parts": [prompt]})
-    if len(conversation_history) > CONTEXT_LENGTH:
-        conversation_history[:] = conversation_history[-CONTEXT_LENGTH:]
-
-    def generate_response():
-        return model.generate_content(
-            conversation_history,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=MAX_TOKENS
+        # Geminiからレスポンスを生成
+        def generate_response():
+            return self.model.generate_content(
+                self.conversation_history,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=self.max_tokens
+                )
             )
-        )
-
-    response = safe_api_call(generate_response)
-    assistant_response = response.text.strip()
     
-    json_match = re.search(r'```(?:json)?\s*(.*?)```', assistant_response, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1).strip()
-    else:
-        json_str = assistant_response
-    
-    try:
-        tool_call = json.loads(json_str)
-        if "function" in tool_call and "arguments" in tool_call:
-            func_name = tool_call["function"]
-            args = tool_call["arguments"]
-            
-            if func_name == "generate_code":
-                task = args.get("task", args.get("description", prompt))
-                def generate_code_response():
-                    code_prompt = f"Pythonで{task}を実装するコードだけを生成してください。説明、コメント、コードブロック（```）は一切不要です。"
-                    return model.generate_content(code_prompt).text.strip()
-                raw_code_response = safe_api_call(generate_code_response)
-                clean_code = clean_code_output(raw_code_response)
-                formatted_response = format_response("Generated Code", clean_code, is_code=True)
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "review_code":
-                formatted_response = process_code_tool("review", args, prompt, 
-                    lambda code: model.generate_content(f"以下のPythonコードをレビューして、改善点や提案を自然言語で教えてください:\n{code}").text.strip())
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "run_code":
-                code = args.get("code") or get_most_recent_code()
-                if not code:
-                    formatted_response = format_response("Error", "実行するコードが見つかりませんでした。")
-                    conversation_history.append({"role": "model", "parts": [formatted_response]})
-                    return formatted_response
-                try:
-                    with open("temp.py", "w") as f:
-                        f.write(code)
-                    result = subprocess.check_output(["python", "temp.py"], text=True, stderr=subprocess.STDOUT)
-                    formatted_response = format_response("Execution", result.strip())
-                except subprocess.CalledProcessError as e:
-                    formatted_response = format_response("Execution Error", e.output.strip())
-                finally:
-                    if os.path.exists("temp.py"):
-                        os.remove("temp.py")
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "debug_code":
-                formatted_response = process_code_tool("debug", args, prompt, 
-                    lambda code: model.generate_content(f"以下のPythonコードをデバッグして、潜在的なバグや問題点を自然言語で教えてください:\n{code}").text.strip())
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "save_code":
-                code = args.get("code") or get_most_recent_code()
-                if not code:
-                    formatted_response = format_response("Error", "保存するコードが見つかりませんでした。")
-                    conversation_history.append({"role": "model", "parts": [formatted_response]})
-                    return formatted_response
-                filename = args.get("filename", "output.py")
-                with open(filename, "w") as f:
-                    f.write(code)
-                formatted_response = format_response("Saved", f"コードを {filename} に保存しました。")
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "edit_code":
-                # ファイル名がない場合はプロンプトから抽出を試みる
-                filename = args.get("filename")
-                if not filename:
-                    filename = extract_filename_from_prompt(prompt)
-                
-                if not filename:
-                    formatted_response = format_response("Error", "編集するファイル名が指定されていません。")
-                    conversation_history.append({"role": "model", "parts": [formatted_response]})
-                    return formatted_response
-                
-                if not os.path.exists(filename):
-                    formatted_response = format_response("Error", f"{filename} が見つかりませんでした。")
-                elif not os.access(filename, os.R_OK):
-                    formatted_response = format_response("Error", f"{filename} を読み取る権限がありません。")
-                elif not os.access(filename, os.W_OK):
-                    formatted_response = format_response("Error", f"{filename} を書き込む権限がありません。")
-                else:
-                    with open(filename, "r") as f:
-                        code = f.read()
-                    edit_instruction = args.get("instruction", prompt)
-                    def generate_edit_response():
-                        edit_prompt = f"以下のPythonコードを編集してください。指示: {edit_instruction}\nコード:\n{code}"
-                        return model.generate_content(edit_prompt).text.strip()
-                    edited_code = safe_api_call(generate_edit_response)
-                    clean_code = clean_code_output(edited_code)
-                    
-                    # 変更前のコードと編集後のコードを比較
-                    import difflib
-                    diff = list(difflib.unified_diff(
-                        code.splitlines(), 
-                        clean_code.splitlines(),
-                        fromfile=f"修正前: {filename}",
-                        tofile=f"修正後: {filename}",
-                        lineterm=''
-                    ))
-                    diff_text = '\n'.join(diff) if diff else "変更はありませんでした。"
-                    
-                    with open(filename, "w") as f:
-                        f.write(clean_code)
-                    
-                    formatted_response = format_response("Edited", clean_code, is_code=True)
-                    formatted_response += f"\n\nDiff:\n```diff\n{diff_text}\n```"
-                
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "test_code":
-                formatted_response = process_code_tool("test", args, prompt, 
-                    lambda code: model.generate_content(f"以下のPythonコード用のテストコードを生成してください:\n{code}").text.strip(), 
-                    is_code=True)
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
-            elif func_name == "explain_code":
-                formatted_response = process_code_tool("explain", args, prompt, 
-                    lambda code: model.generate_content(f"以下のPythonコードの動作を自然言語で説明してください:\n{code}").text.strip())
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
-                return formatted_response
-                
+        response = self.safe_api_call(generate_response)
+        assistant_response = response.text.strip()
+        
+        # JSON応答の抽出 - 複数のパターンに対応
+        json_match = re.search(r'```(?:json)?\s*(.*?)```', assistant_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        else:
+            # JSON形式でない場合、またはブロック外にある場合を処理
+            # 単純なJSONオブジェクトを検出する正規表現
+            json_match = re.search(r'(\{.*\})', assistant_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1).strip()
             else:
-                formatted_response = format_response("Error", f"不明な関数名 '{func_name}' です。")
-                conversation_history.append({"role": "model", "parts": [formatted_response]})
+                json_str = assistant_response
+        
+        try:
+            # JSON解析とツール呼び出し
+            tool_call = json.loads(json_str)
+            # JSONの構造検証を追加
+            if not isinstance(tool_call, dict):
+                raise TypeError("JSON response is not a dictionary")
+                
+            if "function" in tool_call and "arguments" in tool_call:
+                func_name = tool_call["function"]
+                args = tool_call["arguments"]
+                
+                # 各ツール関数の処理
+                if func_name == "generate_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: handle_generate_code(args, prompt, self.model)
+                    )
+                
+                elif func_name == "review_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("review", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコードをレビューして、改善点や提案を自然言語で教えてください:\n{code}"
+                            ).text.strip(),
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "debug_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("debug", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコードをデバッグして、潜在的なバグや問題点を自然言語で教えてください:\n{code}"
+                            ).text.strip(),
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "save_code":
+                    formatted_response = handle_save_code(args, self.get_most_recent_code)
+                
+                elif func_name == "edit_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: handle_edit_code(args, prompt, self.model)
+                    )
+                
+                elif func_name == "test_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("test", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコード用のテストコードを生成してください:\n{code}"
+                            ).text.strip(), 
+                            is_code=True,
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "explain_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("explain", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコードの動作を自然言語で説明してください:\n{code}"
+                            ).text.strip(),
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "refactor_code":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("refactor", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコードをリファクタリングしてください。より簡潔で効率的なコードにしてください:\n{code}"
+                            ).text.strip(),
+                            is_code=True,
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "generate_docs":
+                    formatted_response = self.safe_api_call(
+                        lambda: process_code_tool("documentation", args, prompt, 
+                            lambda code: self.model.generate_content(
+                                f"以下のPythonコードにドキュメント文字列（docstring）とコメントを追加してください:\n{code}"
+                            ).text.strip(),
+                            is_code=True,
+                            get_most_recent_code_func=self.get_most_recent_code
+                        )
+                    )
+                
+                elif func_name == "run_code":
+                    formatted_response = format_response("Error", "コード実行機能は現在利用できません。IDEの実行機能をご利用ください。")
+                
+                else:
+                    formatted_response = format_response("Error", f"不明な関数名 '{func_name}' です。")
+                
+                # 会話履歴に応答を追加
+                self.conversation_history.append({"role": "model", "parts": [formatted_response]})
                 return formatted_response
-    except json.JSONDecodeError:
-        conversation_history.append({"role": "model", "parts": [assistant_response]})
+                
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON解析エラー: {e}. 通常の応答として処理します。")
+            self.conversation_history.append({"role": "model", "parts": [assistant_response]})
+            return assistant_response
+        except Exception as e:
+            logger.error(f"ツール呼び出しエラー: {e}")
+            error_response = format_response("Error", f"ツール呼び出し中にエラーが発生しました: {str(e)}")
+            self.conversation_history.append({"role": "model", "parts": [error_response]})
+            return error_response
+        
+        # デフォルトの応答
+        self.conversation_history.append({"role": "model", "parts": [assistant_response]})
         return assistant_response
     
-    conversation_history.append({"role": "model", "parts": [assistant_response]})
-    return assistant_response
+    def run_cli(self):
+        """CLIインターフェースを実行"""
+        logger.info("CLI AI エージェントへようこそ。終了するには 'exit' または 'quit' と入力してください。")
+        
+        while True:
+            try:
+                user_input = input("User> ")
+                if user_input.lower() in ["exit", "quit"]:
+                    logger.info("エージェントを終了します。")
+                    break
+                    
+                response = self.chat_with_gemini(user_input)
+                print(response)
+                
+            except KeyboardInterrupt:
+                logger.info("\nエージェントを終了します。")
+                break
+                
+            except Exception as e:
+                logger.error(f"エラーが発生しました: {str(e)}")
+                logger.info("もう一度試すか、別のコマンドを入力してください。")
+    
+    def cleanup(self):
+        """一時ファイルの削除などのクリーンアップ処理 - 改善版"""
+        try:
+            if self.temp_dir.exists():
+                logger.info(f"一時ディレクトリ {self.temp_dir} のクリーンアップを実行中...")
+                # 一時ディレクトリ内のファイルを削除
+                for file in self.temp_dir.glob("*"):
+                    try:
+                        if file.is_file():
+                            logger.debug(f"一時ファイル {file} を削除中...")
+                            file.unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.warning(f"ファイル {file} の削除中にエラー: {str(e)}")
+                
+                # 一時ディレクトリを削除
+                try:
+                    self.temp_dir.rmdir()
+                    logger.info(f"一時ディレクトリ {self.temp_dir} を削除しました")
+                except OSError as e:
+                    logger.warning(f"一時ディレクトリの削除に失敗: {str(e)}")
+                    # 強制的に削除を試みる
+                    try:
+                        shutil.rmtree(self.temp_dir, ignore_errors=True)
+                        logger.info("一時ディレクトリを強制的に削除しました")
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"クリーンアップ中にエラーが発生しました: {str(e)}")
+            
+        # 作業ディレクトリに残っているかもしれないtemp*.pyファイルもチェック
+        try:
+            for temp_file in Path(".").glob("temp*.py"):
+                try:
+                    temp_file.unlink(missing_ok=True)
+                    logger.debug(f"残留一時ファイル {temp_file} を削除しました")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 def main():
     parser = argparse.ArgumentParser(description="CLI AI エージェント")
-    parser.add_argument('--max_tokens', type=int, default=500, help="出力の最大トークン数")
-    parser.add_argument('--context_length', type=int, default=10, help="保存する会話の最大数")
+    parser.add_argument('--max_tokens', type=int, default=DEFAULT_MAX_TOKENS, help="出力の最大トークン数")
+    parser.add_argument('--context_length', type=int, default=DEFAULT_CONTEXT_LENGTH, help="保存する会話の最大数")
+    parser.add_argument('--model', type=str, default=DEFAULT_MODEL, help="使用するGeminiモデル")
     parser.add_argument('--task', type=str, help="タスクを指定（例: コード生成）")
     parser.add_argument('--file', type=str, help="対象ファイル")
+    parser.add_argument('--log_level', type=str, choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO', 
+                        help="ログレベルを設定")
     args = parser.parse_args()
-
-    global MAX_TOKENS, CONTEXT_LENGTH
-    MAX_TOKENS = args.max_tokens
-    CONTEXT_LENGTH = args.context_length
-
-    if args.task == "コード生成" and args.file:
-        prompt = f"Pythonで便利な関数を生成して{args.file}に保存してください。"
-        response = chat_with_gemini(prompt)
-        try:
-            code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
-            if code_match:
-                code = code_match.group(1).strip()
-                with open(args.file, 'w') as f:
-                    f.write(code)
+    
+    # ログレベルを設定
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    # アシスタントの作成
+    assistant = CLIAssistant(
+        max_tokens=args.max_tokens,
+        context_length=args.context_length,
+        model=args.model
+    )
+    
+    
+    try:
+        # 特定のタスクが指定された場合の処理
+        if args.task == "コード生成" and args.file:
+            prompt = f"Pythonで便利な関数を生成して{args.file}に保存してください。"
+            response = assistant.chat_with_gemini(prompt)
+            try:
+                code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+                if (code_match):
+                    code = code_match.group(1).strip()
+                    with open(args.file, 'w') as f:
+                        f.write(code)
+                    print(response)
+                    logger.info(f"コードを {args.file} に保存しました。")
+                else:
+                    raise IndexError("コードブロックが見つかりません")
+            except IndexError as e:
+                logger.error(f"コードの抽出に失敗しました: {str(e)}")
                 print(response)
-                print(f"コードを {args.file} に保存しました。")
-            else:
-                raise IndexError("コードブロックが見つかりません")
-        except IndexError as e:
-            print(f"コードの抽出に失敗しました: {str(e)}")
-            print(response)
-        return
-
-    print("CLI AI エージェントへようこそ。終了するには 'exit' または 'quit' と入力してください。")
-    while True:
-        try:
-            user_input = input("User> ")
-            if user_input.lower() in ["exit", "quit"]:
-                print("エージェントを終了します。")
-                break
-            response = chat_with_gemini(user_input)
-            print(response)
-        except KeyboardInterrupt:
-            print("\nエージェントを終了します。")
-            break
-        except Exception as e:
-            print(f"エラーが発生しました: {str(e)}")
-            print("もう一度試すか、別のコマンドを入力してください。")
+        else:
+            # インタラクティブモード
+            assistant.run_cli()
+    finally:
+        # クリーンアップ処理
+        assistant.cleanup()
 
 if __name__ == '__main__':
     main()

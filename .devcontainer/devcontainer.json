@@ -8,7 +8,8 @@
 		"vscode": {
 			"extensions": [
 				"ms-azuretools.vscode-docker",
-				"eamodio.gitlens"
+				"eamodio.gitlens",
+				"MS-CEINTL.vscode-language-pack-ja"
 			]
 		}
 	}
