@@ -16,6 +16,9 @@ from tools import (
     clean_code_output, format_response, extract_filename_from_prompt,
     process_code_tool, handle_generate_code, handle_save_code, handle_edit_code
 )
+from workflow import (
+    Workflow, WorkflowStep, WorkflowStepType, create_workflow_from_prompt
+)
 
 # ロギング設定
 logging.basicConfig(
@@ -112,6 +115,23 @@ JSONだけを返し、マークダウンのコードブロックで囲まない�
                     return match.group(1).strip()
         return None
     
+    def create_workflow(self, task_description: str) -> Workflow:
+        """タスク記述からワークフローを作成"""
+        return create_workflow_from_prompt(task_description, self.model)
+        
+    def execute_workflow(self, workflow: Workflow, interactive: bool = True) -> Dict:
+        """ワークフローを実行"""
+        workflow.set_interactive_mode(interactive)
+        return workflow.execute()
+        
+    def save_workflow(self, workflow: Workflow, filename: str) -> None:
+        """ワークフローを保存"""
+        workflow.save_to_file(filename)
+        
+    def load_workflow(self, filename: str) -> Workflow:
+        """保存されたワークフローを読み込む"""
+        return Workflow.load_from_file(filename, self.model)
+        
     def chat_with_gemini(self, prompt: str) -> str:
         """GeminiとのChat形式での対話"""
         # 会話履歴に追加
@@ -237,6 +257,56 @@ JSONだけを返し、マークダウンのコードブロックで囲まない�
                 elif func_name == "run_code":
                     formatted_response = format_response("Error", "コード実行機能は現在利用できません。IDEの実行機能をご利用ください。")
                 
+                # ワークフロー関連の機能を追加
+                elif func_name == "create_workflow":
+                    task = args.get("task", prompt)
+                    try:
+                        workflow = self.create_workflow(task)
+                        workflow_name = args.get("name", f"workflow_{int(time.time())}")
+                        
+                        # ワークフローを保存
+                        filename = args.get("filename", f"{workflow_name}.json")
+                        self.save_workflow(workflow, filename)
+                        
+                        formatted_response = format_response(
+                            "Workflow Created", 
+                            f"ワークフロー '{workflow.name}' を作成し、{filename} に保存しました。\n"
+                            f"説明: {workflow.description}\n"
+                            f"ステップ数: {len(workflow.steps)}"
+                        )
+                    except Exception as e:
+                        formatted_response = format_response(
+                            "Error", 
+                            f"ワークフロー作成中にエラーが発生しました: {str(e)}"
+                        )
+                
+                elif func_name == "execute_workflow":
+                    filename = args.get("filename")
+                    if not filename:
+                        formatted_response = format_response(
+                            "Error", 
+                            "実行するワークフローのファイル名が指定されていません。"
+                        )
+                    else:
+                        try:
+                            workflow = self.load_workflow(filename)
+                            interactive = args.get("interactive", True)
+                            results = self.execute_workflow(workflow, interactive)
+                            
+                            # 結果の要約
+                            result_summary = "\n".join(f"- {step_id}: {'成功' if 'error' not in result else '失敗: '+result['error']}" 
+                                                for step_id, result in results.items())
+                            
+                            formatted_response = format_response(
+                                "Workflow Executed", 
+                                f"ワークフロー '{workflow.name}' を実行しました。\n結果概要:\n{result_summary}"
+                            )
+                        except Exception as e:
+                            formatted_response = format_response(
+                                "Error", 
+                                f"ワークフロー実行中にエラーが発生しました: {str(e)}"
+                            )
+                
                 else:
                     formatted_response = format_response("Error", f"不明な関数名 '{func_name}' です。")
                 
@@ -329,6 +399,8 @@ def main():
     parser.add_argument('--file', type=str, help="対象ファイル")
     parser.add_argument('--log_level', type=str, choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO', 
                         help="ログレベルを設定")
+    parser.add_argument('--workflow', type=str, help="実行するワークフローファイル")
+    parser.add_argument('--non-interactive', action='store_true', help="ワークフローを対話なしで実行")
     args = parser.parse_args()
     
     # ログレベルを設定
@@ -343,8 +415,28 @@ def main():
     
     
     try:
+        # ワークフローが指定された場合
+        if args.workflow:
+            workflow_path = args.workflow
+            if not os.path.exists(workflow_path):
+                logger.error(f"指定されたワークフローファイル {workflow_path} が見つかりません")
+                sys.exit(1)
+            
+            workflow = assistant.load_workflow(workflow_path)
+            logger.info(f"ワークフロー '{workflow.name}' を読み込みました")
+            results = assistant.execute_workflow(workflow, not args.non_interactive)
+            
+            # 結果の要約表示
+            print("\n=== ワークフロー実行結果 ===")
+            for step_id, result in results.items():
+                if "error" in result:
+                    status = f"失敗: {result['error']}"
+                else:
+                    status = "成功"
+                print(f"- {step_id}: {status}")
+        
         # 特定のタスクが指定された場合の処理
-        if args.task == "コード生成" and args.file:
+        elif args.task == "コード生成" and args.file:
             prompt = f"Pythonで便利な関数を生成して{args.file}に保存してください。"
             response = assistant.chat_with_gemini(prompt)
             try:
