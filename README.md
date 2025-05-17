@@ -26,6 +26,16 @@ python main.py
 python main.py --max_tokens 200 --context_length 15
 ```
 
+### マルチエージェントモード
+
+複数のAIエージェントが協力してタスクを進めるモードを起動するには以下のオプションを使用します。
+
+```bash
+python main.py --multi-agent
+```
+
+セッション終了後、`front_log.txt`、`se_log.txt`、`pg_log.txt` として会話ログが保存されます。
+
 ### オプション
 - `--max_tokens`: 出力の最大トークン数（デフォルト: 150）
 - `--context_length`: 保持する会話の最大数（デフォルト: 10）
