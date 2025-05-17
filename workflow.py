@@ -122,10 +122,20 @@ class Workflow:
             logger.info(f"ステップ '{current_step_id}' を実行: {current_step.description}")
             
             # 条件チェック
-            if current_step.condition and not self._evaluate_condition(current_step.condition):
-                logger.info(f"条件 '{current_step.condition}' が満たされませんでした。スキップします")
-                current_step_id = current_step.next_on_failure
-                continue
+            if current_step.condition:
+                condition_ok = self._evaluate_condition(current_step.condition, current_step_id)
+                # 評価エラーが保存されている場合は失敗として扱う
+                if not condition_ok:
+                    if self.results.get(current_step_id, {}).get("error"):
+                        logger.error(
+                            f"条件式の評価に失敗: {self.results[current_step_id]['error']}"
+                        )
+                    else:
+                        logger.info(
+                            f"条件 '{current_step.condition}' が満たされませんでした。スキップします"
+                        )
+                    current_step_id = current_step.next_on_failure
+                    continue
                 
             # ステップのタイプに応じた実行
             try:
@@ -338,7 +348,7 @@ class Workflow:
         else:
             raise ValueError(f"未サポートのステップタイプ: {step.step_type.value}")
     
-    def _evaluate_condition(self, condition: str) -> bool:
+    def _evaluate_condition(self, condition: str, step_id: Optional[str] = None) -> bool:
         """条件式を評価"""
         # 簡易的な条件評価の例
         # 実際には安全なエバリュエータを実装する
@@ -356,6 +366,8 @@ class Workflow:
             return bool(eval(eval_condition))
         except Exception as e:
             logger.error(f"条件評価エラー: {str(e)}")
+            if step_id is not None:
+                self.results.setdefault(step_id, {})["error"] = str(e)
             return False
     
     def _get_user_confirmation(self, result: Dict, step_id: str) -> bool:
