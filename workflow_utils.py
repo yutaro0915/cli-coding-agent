@@ -107,8 +107,9 @@ def optimize_step_order(workflow: WorkflowController, dependencies: List[TaskDep
         if node not in visited:
             visit(node)
     
-    # 順序を逆転して正しい実行順序にする
-    workflow.step_order = list(reversed(new_order))
+    # new_order は依存ノードが先になるトポロジカル順序
+    # そのまま使用することで依存関係を満たした実行順となる
+    workflow.step_order = new_order
 
 def export_workflow_to_json(workflow: WorkflowController, file_path: str) -> None:
     """ワークフローをJSONファイルにエクスポート"""
