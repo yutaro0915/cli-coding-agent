@@ -26,6 +26,18 @@ python main.py
 python main.py --max_tokens 200 --context_length 15 --model gemini-2.0-flash
 ```
 
+### タスク指定例
+
+特定のツールを直接実行できます。
+
+```bash
+python main.py --task generate_code --file output.py
+```
+
+```bash
+python main.py --task review_code --file foo.py
+```
+
 ### マルチエージェントモード
 
 複数のAIエージェントが協力してタスクを進めるモードを起動するには以下のオプションを使用します。

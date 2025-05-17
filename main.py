@@ -395,8 +395,10 @@ def main():
     parser.add_argument('--max_tokens', type=int, default=DEFAULT_MAX_TOKENS, help="出力の最大トークン数 (デフォルト: %(default)s)")
     parser.add_argument('--context_length', type=int, default=DEFAULT_CONTEXT_LENGTH, help="保存する会話の最大数")
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL, help="使用するGeminiモデル")
-    parser.add_argument('--task', type=str, help="タスクを指定（例: コード生成）")
-    parser.add_argument('--file', type=str, help="対象ファイル")
+    parser.add_argument('--task', type=str,
+                        help="実行するツール名 (generate_code, review_code など)")
+    parser.add_argument('--file', type=str,
+                        help="対象ファイル (生成先または入力ファイル)")
     parser.add_argument('--log_level', type=str, choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], default='INFO', 
                         help="ログレベルを設定")
     parser.add_argument('--workflow', type=str, help="実行するワークフローファイル")
@@ -447,22 +449,83 @@ def main():
                 print(f"- {step_id}: {status}")
         
         # 特定のタスクが指定された場合の処理
-        elif args.task == "コード生成" and args.file:
-            prompt = f"Pythonで便利な関数を生成して{args.file}に保存してください。"
-            response = assistant.chat_with_gemini(prompt)
-            try:
-                code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
-                if (code_match):
-                    code = code_match.group(1).strip()
-                    with open(args.file, 'w') as f:
-                        f.write(code)
-                    print(response)
-                    logger.info(f"コードを {args.file} に保存しました。")
-                else:
-                    raise IndexError("コードブロックが見つかりません")
-            except IndexError as e:
-                logger.error(f"コードの抽出に失敗しました: {str(e)}")
-                print(response)
+        elif args.task:
+            task = args.task
+            filename = args.file
+
+            if task == "generate_code" and filename:
+                result = handle_generate_code({}, "便利な関数", assistant.model)
+                code = clean_code_output(result)
+                with open(filename, "w") as f:
+                    f.write(code)
+                print(result)
+                logger.info(f"コードを {filename} に保存しました。")
+
+            elif task in ["review_code", "debug_code", "test_code",
+                          "explain_code", "refactor_code", "generate_docs"] and filename:
+                if not os.path.exists(filename):
+                    logger.error(f"指定されたファイル {filename} が見つかりません")
+                    sys.exit(1)
+                code = Path(filename).read_text()
+                args_dict = {"code": code}
+
+                if task == "review_code":
+                    result = process_code_tool(
+                        "review", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコードをレビューして、改善点や提案を自然言語で教えてください:\n{c}"
+                        ).text.strip()
+                    )
+                elif task == "debug_code":
+                    result = process_code_tool(
+                        "debug", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコードをデバッグして、潜在的なバグや問題点を自然言語で教えてください:\n{c}"
+                        ).text.strip()
+                    )
+                elif task == "test_code":
+                    result = process_code_tool(
+                        "test", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコード用のテストコードを生成してください:\n{c}"
+                        ).text.strip(),
+                        is_code=True
+                    )
+                elif task == "explain_code":
+                    result = process_code_tool(
+                        "explain", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコードの動作を自然言語で説明してください:\n{c}"
+                        ).text.strip()
+                    )
+                elif task == "refactor_code":
+                    result = process_code_tool(
+                        "refactor", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコードをリファクタリングしてください。より簡潔で効率的なコードにしてください:\n{c}"
+                        ).text.strip(),
+                        is_code=True
+                    )
+                else:  # generate_docs
+                    result = process_code_tool(
+                        "documentation", args_dict, "",
+                        lambda c: assistant.model.generate_content(
+                            f"以下のPythonコードにドキュメント文字列（docstring）とコメントを追加してください:\n{c}"
+                        ).text.strip(),
+                        is_code=True
+                    )
+                print(result)
+
+            elif task == "save_code" and filename:
+                result = handle_save_code({"filename": filename}, assistant.get_most_recent_code)
+                print(result)
+
+            elif task == "edit_code" and filename:
+                result = handle_edit_code({"filename": filename}, "", assistant.model)
+                print(result)
+
+            else:
+                logger.error("タスクまたはファイルの指定が正しくありません")
         else:
             # インタラクティブモード
             assistant.run_cli()
