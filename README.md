@@ -3,11 +3,13 @@
 コマンドラインで動作するAIアシスタントです。Google Generative AI (Gemini) を利用して対話型のチャット体験を提供します。
 ## セットアップ
 
-1. 必要なパッケージをインストール:
+1. リポジトリをクローンし、依存パッケージをインストールします。
 ```bash
-pip install google-generativeai
+git clone <repository-url>
+cd cli-coding-agent
+pip install -r requirements.txt
 ```
-このパッケージは `requirements.txt` にも含まれています。
+Gemini API クライアント(`google-generativeai`)などの必要なライブラリが全てインストールされます。
 
 2. Google APIキーを環境変数として設定:
 ```bash
@@ -26,6 +28,12 @@ python main.py
 python main.py --max_tokens 200 --context_length 15 --model gemini-2.0-flash
 ```
 
+ワークフローを指定して実行する例:
+```bash
+python main.py --workflow my_workflow.json
+```
+`--non-interactive` を付けるとユーザー確認なしで全ステップが順次実行されます。
+
 ### タスク指定例
 
 特定のツールを直接実行できます。
@@ -33,6 +41,9 @@ python main.py --max_tokens 200 --context_length 15 --model gemini-2.0-flash
 ```bash
 python main.py --task generate_code --file output.py
 ```
+
+利用可能なタスクは `generate_code`、`review_code`、`debug_code`、`test_code` などです。
+各タスクでは `--file` オプションで入力ファイルや出力先を指定します。
 
 ```bash
 python main.py --task review_code --file foo.py
@@ -53,6 +64,9 @@ python main.py --multi-agent
 - `--context_length`: 保持する会話の最大数（デフォルト: 10）
 
 - `--model`: 使用するモデル名 (例: gemini-2.0-flash, gemini-2.0-pro)
+- `--workflow`: JSONで定義したワークフローを実行
+- `--non-interactive`: ワークフロー実行時に確認を求めない
+- `--multi-agent`: マルチエージェントプロジェクトモードを起動
 
 ## 終了方法
 会話を終了するには `exit` または `quit` と入力してください。
