@@ -392,7 +392,7 @@ JSONだけを返し、マークダウンのコードブロックで囲まない�
 
 def main():
     parser = argparse.ArgumentParser(description="CLI AI エージェント")
-    parser.add_argument('--max_tokens', type=int, default=DEFAULT_MAX_TOKENS, help="出力の最大トークン数")
+    parser.add_argument('--max_tokens', type=int, default=DEFAULT_MAX_TOKENS, help="出力の最大トークン数 (デフォルト: %(default)s)")
     parser.add_argument('--context_length', type=int, default=DEFAULT_CONTEXT_LENGTH, help="保存する会話の最大数")
     parser.add_argument('--model', type=str, default=DEFAULT_MODEL, help="使用するGeminiモデル")
     parser.add_argument('--task', type=str, help="タスクを指定（例: コード生成）")
