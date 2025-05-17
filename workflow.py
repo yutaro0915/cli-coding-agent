@@ -131,14 +131,15 @@ class Workflow:
             try:
                 result = self._execute_step(current_step)
                 self.results[current_step_id] = result
-                
+
                 # インタラクティブモードでユーザーの確認
                 if self.interactive_mode and current_step.step_type != WorkflowStepType.USER_INPUT:
                     if not self._get_user_confirmation(result, current_step_id):
                         logger.info("ユーザーがステップ結果を却下しました")
                         return self.results
-                
-                current_step_id = current_step.next_on_success
+
+                # resultにnext_stepがあればそれを優先
+                current_step_id = result.get("next_step", current_step.next_on_success)
             except Exception as e:
                 logger.error(f"ステップ実行中にエラー: {str(e)}")
                 self.results[current_step_id] = {"error": str(e)}
@@ -233,10 +234,109 @@ class Workflow:
                     return {"error": f"ファイル書き込みエラー: {str(e)}"}
             else:
                 return {"error": f"未サポートのファイル操作: {operation}"}
-                
-        # その他のステップタイプも同様に実装...
-        
-        return {"warning": f"ステップタイプ {step.step_type} の実装が完了していません"}
+
+        elif step.step_type == WorkflowStepType.CODE_REVIEW:
+            filename = step.arguments.get("filename")
+            if filename:
+                try:
+                    with open(filename, "r") as f:
+                        code = f.read()
+                except FileNotFoundError:
+                    return {"error": f"ファイル {filename} が見つかりません"}
+            else:
+                prev_step_id = step.arguments.get("previous_step")
+                if prev_step_id and prev_step_id in self.results:
+                    code = self.results[prev_step_id].get("code", "")
+                else:
+                    return {"error": "レビューするコードが指定されていません"}
+
+            prompt = f"以下のPythonコードをレビューして改善点を提案してください:\n{code}"
+            review = self.model_interface.generate_content(prompt).text.strip()
+            return {"review": review}
+
+        elif step.step_type == WorkflowStepType.CODE_REFACTORING:
+            filename = step.arguments.get("filename")
+            if filename:
+                try:
+                    with open(filename, "r") as f:
+                        code = f.read()
+                except FileNotFoundError:
+                    return {"error": f"ファイル {filename} が見つかりません"}
+            else:
+                prev_step_id = step.arguments.get("previous_step")
+                if prev_step_id and prev_step_id in self.results:
+                    code = self.results[prev_step_id].get("code", "")
+                else:
+                    return {"error": "リファクタリングするコードが指定されていません"}
+
+            prompt = f"以下のPythonコードをリファクタリングしてください:\n{code}"
+            response = self.model_interface.generate_content(prompt).text.strip()
+            code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+            new_code = code_match.group(1).strip() if code_match else response
+            return {"code": new_code, "original_code": code, "full_response": response}
+
+        elif step.step_type == WorkflowStepType.TEST_GENERATION:
+            filename = step.arguments.get("filename")
+            if filename:
+                try:
+                    with open(filename, "r") as f:
+                        code = f.read()
+                except FileNotFoundError:
+                    return {"error": f"ファイル {filename} が見つかりません"}
+            else:
+                prev_step_id = step.arguments.get("previous_step")
+                if prev_step_id and prev_step_id in self.results:
+                    code = self.results[prev_step_id].get("code", "")
+                else:
+                    return {"error": "テスト生成対象のコードが指定されていません"}
+
+            prompt = f"以下のPythonコード用のテストコードを生成してください:\n{code}"
+            response = self.model_interface.generate_content(prompt).text.strip()
+            code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+            test_code = code_match.group(1).strip() if code_match else response
+            return {"code": test_code, "full_response": response}
+
+        elif step.step_type == WorkflowStepType.DOCUMENTATION:
+            filename = step.arguments.get("filename")
+            if filename:
+                try:
+                    with open(filename, "r") as f:
+                        code = f.read()
+                except FileNotFoundError:
+                    return {"error": f"ファイル {filename} が見つかりません"}
+            else:
+                prev_step_id = step.arguments.get("previous_step")
+                if prev_step_id and prev_step_id in self.results:
+                    code = self.results[prev_step_id].get("code", "")
+                else:
+                    return {"error": "ドキュメント生成対象のコードが指定されていません"}
+
+            prompt = f"以下のPythonコードにドキュメント文字列とコメントを追加してください:\n{code}"
+            response = self.model_interface.generate_content(prompt).text.strip()
+            code_match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+            doc_code = code_match.group(1).strip() if code_match else response
+            return {"code": doc_code, "full_response": response}
+
+        elif step.step_type == WorkflowStepType.CONDITIONAL:
+            cond = step.arguments.get("condition")
+            if cond is None:
+                raise ValueError("CONDITIONAL ステップには 'condition' 引数が必要です")
+            result = self._evaluate_condition(cond)
+            next_step = step.next_on_success if result else step.next_on_failure
+            return {"condition": result, "next_step": next_step}
+
+        elif step.step_type == WorkflowStepType.LOOP:
+            cond = step.arguments.get("condition")
+            body_step = step.arguments.get("body_step")
+            if cond is None or body_step is None:
+                raise ValueError("LOOP ステップには 'condition' と 'body_step' が必要です")
+            if self._evaluate_condition(cond):
+                return {"loop": True, "next_step": body_step}
+            else:
+                return {"loop": False, "next_step": step.next_on_success}
+
+        else:
+            raise ValueError(f"未サポートのステップタイプ: {step.step_type.value}")
     
     def _evaluate_condition(self, condition: str) -> bool:
         """条件式を評価"""
