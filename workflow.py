@@ -349,17 +349,17 @@ class Workflow:
         else:
             raise ValueError(f"未サポートのステップタイプ: {step.step_type.value}")
     
-     def _evaluate_condition(self, condition: str, step_id: Optional[str] = None) -> bool:
-    """条件式を安全に評価"""
-    # 簡易的な条件評価の例
-    # 実際には安全なエバリュエータを実装する
+    def _evaluate_condition(self, condition: str, step_id: Optional[str] = None) -> bool:
+        """条件式を安全に評価"""
+        # 簡易的な条件評価の例
+        # 実際には安全なエバリュエータを実装する
         try:
             pattern = r'\{([^}]+)\.([^}]+)\}'
 
             def replace_var(match):
-                step_id, key = match.groups()
-                if step_id in self.results and key in self.results[step_id]:
-                    return repr(self.results[step_id][key])
+                sid, key = match.groups()
+                if sid in self.results and key in self.results[sid]:
+                    return repr(self.results[sid][key])
                 return "None"
 
             eval_condition = re.sub(pattern, replace_var, condition)
