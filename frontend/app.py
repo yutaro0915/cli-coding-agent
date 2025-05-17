@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
+import sys
 import streamlit as st
 import google.generativeai as genai
+
+# プロジェクトルートをモジュール検索パスに追加
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from agent_team import Agent
 
