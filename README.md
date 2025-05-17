@@ -44,3 +44,11 @@ python main.py --multi-agent
 
 ## 終了方法
 会話を終了するには `exit` または `quit` と入力してください。
+
+### フロントエンドUI
+Streamlit を利用した簡易フロントエンドを `frontend` ディレクトリに追加しています。
+次のコマンドで起動し、ブラウザからエージェントとの対話を試すことができます。
+```bash
+streamlit run frontend/app.py
+```
+サイドバーでプロジェクトを選択し、中央下部の入力欄から FrontAI とのチャットを行えます。右側のログ欄には SEAI と PGAI の会話履歴が表示されます。
