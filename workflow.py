@@ -5,6 +5,7 @@ CLIコーディングアシスタント用のワークフロー機能
 
 import re
 import json
+import ast
 import logging
 from typing import Dict, List, Callable, Any, Optional
 from enum import Enum
@@ -239,21 +240,78 @@ class Workflow:
         return {"warning": f"ステップタイプ {step.step_type} の実装が完了していません"}
     
     def _evaluate_condition(self, condition: str) -> bool:
-        """条件式を評価"""
-        # 簡易的な条件評価の例
-        # 実際には安全なエバリュエータを実装する
+        """条件式を安全に評価"""
         try:
-            # {step_id.result_key} 形式の参照を解決
             pattern = r'\{([^}]+)\.([^}]+)\}'
-            
+
             def replace_var(match):
                 step_id, key = match.groups()
                 if step_id in self.results and key in self.results[step_id]:
                     return repr(self.results[step_id][key])
                 return "None"
-                
+
             eval_condition = re.sub(pattern, replace_var, condition)
-            return bool(eval(eval_condition))
+
+            def _safe_eval(expr: str):
+                node = ast.parse(expr, mode="eval")
+
+                def _eval(n):
+                    if isinstance(n, ast.Expression):
+                        return _eval(n.body)
+                    if isinstance(n, ast.BoolOp):
+                        if isinstance(n.op, ast.And):
+                            return all(_eval(v) for v in n.values)
+                        if isinstance(n.op, ast.Or):
+                            return any(_eval(v) for v in n.values)
+                        raise ValueError("unsupported boolean operator")
+                    if isinstance(n, ast.BinOp):
+                        left = _eval(n.left)
+                        right = _eval(n.right)
+                        if isinstance(n.op, ast.Add):
+                            return left + right
+                        if isinstance(n.op, ast.Sub):
+                            return left - right
+                        if isinstance(n.op, ast.Mult):
+                            return left * right
+                        if isinstance(n.op, ast.Div):
+                            return left / right
+                        if isinstance(n.op, ast.Mod):
+                            return left % right
+                        raise ValueError("unsupported binary operator")
+                    if isinstance(n, ast.UnaryOp):
+                        operand = _eval(n.operand)
+                        if isinstance(n.op, ast.Not):
+                            return not operand
+                        if isinstance(n.op, ast.USub):
+                            return -operand
+                        if isinstance(n.op, ast.UAdd):
+                            return +operand
+                        raise ValueError("unsupported unary operator")
+                    if isinstance(n, ast.Compare):
+                        left = _eval(n.left)
+                        for op, comp in zip(n.ops, n.comparators):
+                            right = _eval(comp)
+                            if isinstance(op, ast.Eq) and left != right:
+                                return False
+                            if isinstance(op, ast.NotEq) and left == right:
+                                return False
+                            if isinstance(op, ast.Lt) and not left < right:
+                                return False
+                            if isinstance(op, ast.LtE) and not left <= right:
+                                return False
+                            if isinstance(op, ast.Gt) and not left > right:
+                                return False
+                            if isinstance(op, ast.GtE) and not left >= right:
+                                return False
+                            left = right
+                        return True
+                    if isinstance(n, ast.Constant):
+                        return n.value
+                    raise ValueError("unsupported expression")
+
+                return _eval(node)
+
+            return bool(_safe_eval(eval_condition))
         except Exception as e:
             logger.error(f"条件評価エラー: {str(e)}")
             return False
