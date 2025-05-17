@@ -401,6 +401,7 @@ def main():
                         help="ログレベルを設定")
     parser.add_argument('--workflow', type=str, help="実行するワークフローファイル")
     parser.add_argument('--non-interactive', action='store_true', help="ワークフローを対話なしで実行")
+    parser.add_argument('--multi-agent', action='store_true', help="マルチエージェントプロジェクトモードを起動")
     args = parser.parse_args()
     
     # ログレベルを設定
@@ -415,8 +416,18 @@ def main():
     
     
     try:
+        # マルチエージェントモード
+        if args.multi_agent:
+            from agent_team import ProjectCoordinator
+            coordinator = ProjectCoordinator(assistant.model)
+            coordinator.run()
+            logs = coordinator.export_logs()
+            for name, log_content in logs.items():
+                Path(f"{name}_log.txt").write_text(log_content)
+            logger.info("マルチエージェントセッションを終了しました。ログをファイルに保存しました。")
+
         # ワークフローが指定された場合
-        if args.workflow:
+        elif args.workflow:
             workflow_path = args.workflow
             if not os.path.exists(workflow_path):
                 logger.error(f"指定されたワークフローファイル {workflow_path} が見つかりません")
