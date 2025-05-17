@@ -66,8 +66,14 @@
    ```
 4. 特定のタスク用のコマンド:
    ```bash
-   python main.py --task "コード生成" --file "output.py"
+   python main.py --task generate_code --file output.py
    ```
+
+別の例:
+
+```bash
+python main.py --task review_code --file foo.py
+```
 
 ## 拡張・開発のための注意点
 
